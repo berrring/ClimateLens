@@ -1,4 +1,5 @@
 import hashlib
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,8 @@ function evaluatePixel(sample) {
 }
 """
 
+logger = logging.getLogger("climatelens.sentinel")
+
 
 def _bbox_from_location(lat, lon, half_size=0.1):
     return [lon - half_size, lat - half_size, lon + half_size, lat + half_size]
@@ -60,9 +63,17 @@ def fetch_sentinel_bands(
     time_interval=None,
 ):
     if SentinelHubRequest is None:
+        logger.warning("Sentinel Hub library unavailable; skipping real data fetch.")
         return None
     config = get_sh_config()
     if config is None:
+        settings = load_settings()
+        if not settings.enabled:
+            logger.info("Sentinel Hub disabled via SENTINELHUB_ENABLED.")
+        elif not settings.client_id or not settings.client_secret:
+            logger.info("Sentinel Hub credentials missing in environment.")
+        else:
+            logger.info("Sentinel Hub config not available (check sentinelhub install).")
         return None
 
     settings = load_settings()
@@ -112,10 +123,12 @@ def fetch_sentinel_bands(
 
     try:
         data = request.get_data()
-    except Exception:
+    except Exception as err:
+        logger.warning("Sentinel Hub request failed for %s %s: %s", location.get("name"), year, err)
         return None
 
     if not data:
+        logger.info("Sentinel Hub returned empty data for %s %s.", location.get("name"), year)
         return None
 
     bands = np.asarray(data[0], dtype=np.float32)

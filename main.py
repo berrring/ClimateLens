@@ -21,6 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 async def lifespan(app: FastAPI):
     ai_module.ensure_sample_data()
     cache.init_db()
+    logger.info("sentinel_config=%s", sentinel_config.settings_summary())
     yield
 
 

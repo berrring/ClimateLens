@@ -14,6 +14,8 @@ class SentinelSettings:
     client_secret: str | None
     max_cloud: float
     cache_dir: Path
+    base_url: str | None
+    token_url: str | None
     enabled: bool
 
 
@@ -28,12 +30,16 @@ def load_settings():
     client_secret = os.getenv("SENTINELHUB_CLIENT_SECRET") or os.getenv("SH_CLIENT_SECRET")
     max_cloud = float(os.getenv("SENTINELHUB_MAX_CLOUD", "0.2"))
     cache_dir = Path(os.getenv("SENTINELHUB_CACHE_DIR", Path(__file__).parent / "data" / "sentinel_cache"))
+    base_url = os.getenv("SENTINELHUB_BASE_URL") or os.getenv("SH_BASE_URL")
+    token_url = os.getenv("SENTINELHUB_TOKEN_URL") or os.getenv("SH_TOKEN_URL")
     enabled = _env_bool(os.getenv("SENTINELHUB_ENABLED"), default=True)
     return SentinelSettings(
         client_id=client_id,
         client_secret=client_secret,
         max_cloud=max_cloud,
         cache_dir=cache_dir,
+        base_url=base_url,
+        token_url=token_url,
         enabled=enabled,
     )
 
@@ -49,8 +55,25 @@ def get_sh_config():
     config = SHConfig()
     config.sh_client_id = settings.client_id
     config.sh_client_secret = settings.client_secret
+    if settings.base_url:
+        config.sh_base_url = settings.base_url
+    if settings.token_url:
+        config.sh_token_url = settings.token_url
     return config
 
 
 def is_configured():
     return get_sh_config() is not None
+
+
+def settings_summary():
+    settings = load_settings()
+    return {
+        "enabled": settings.enabled,
+        "has_client_id": bool(settings.client_id),
+        "has_client_secret": bool(settings.client_secret),
+        "base_url": settings.base_url,
+        "token_url": settings.token_url,
+        "configured": is_configured(),
+        "sentinelhub_available": SHConfig is not None,
+    }
