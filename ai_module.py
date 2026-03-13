@@ -1,5 +1,6 @@
 ﻿import base64
 import io
+import hashlib
 import re
 import uuid
 from dataclasses import dataclass
@@ -41,8 +42,10 @@ DEFAULT_LOCATION = {"name": "San Francisco, CA", "lat": 37.7749, "lon": -122.419
 
 CITY_DB = {
     "san francisco": ("San Francisco, CA", 37.7749, -122.4194),
+    "los angeles": ("Los Angeles, CA", 34.0522, -118.2437),
     "new york": ("New York, NY", 40.7128, -74.0060),
     "london": ("London, UK", 51.5074, -0.1278),
+    "moscow": ("Moscow, RU", 55.7558, 37.6173),
     "tokyo": ("Tokyo, JP", 35.6895, 139.6917),
     "bishkek": ("Bishkek, KG", 42.8746, 74.5698),
     "almaty": ("Almaty, KZ", 43.2389, 76.8897),
@@ -50,6 +53,151 @@ CITY_DB = {
     "sydney": ("Sydney, AU", -33.8688, 151.2093),
     "reykjavik": ("Reykjavik, IS", 64.1466, -21.9426),
     "mumbai": ("Mumbai, IN", 19.0760, 72.8777),
+}
+
+DEMO_PROFILES = {
+    "san francisco": {
+        "label": "San Francisco",
+        "aliases": ["san francisco", "sf", "san fran"],
+        "base": {"vegetation": 38.0, "water": 8.0, "urban": 30.0, "ice": 1.0},
+        "change": {"vegetation": -6.0, "water": -1.0, "urban": 8.0, "ice": -0.2},
+        "pattern": {
+            "urban_centers": [(0.55, 0.55), (0.45, 0.35)],
+            "veg_centers": [(0.70, 0.75), (0.30, 0.70)],
+            "water_centers": [(0.15, 0.45)],
+            "water_pattern": "coast_west",
+            "urban_spread": 0.18,
+            "veg_spread": 0.28,
+            "water_spread": 0.22,
+        },
+        "noise": 0.06,
+    },
+    "los angeles": {
+        "label": "Los Angeles",
+        "aliases": ["los angeles", "la"],
+        "base": {"vegetation": 24.0, "water": 4.0, "urban": 40.0, "ice": 0.5},
+        "change": {"vegetation": -5.0, "water": -1.5, "urban": 10.0, "ice": -0.2},
+        "pattern": {
+            "urban_centers": [(0.50, 0.55), (0.65, 0.50)],
+            "veg_centers": [(0.30, 0.70)],
+            "water_centers": [(0.10, 0.60)],
+            "water_pattern": "coast_west",
+            "urban_spread": 0.22,
+            "veg_spread": 0.22,
+            "water_spread": 0.18,
+        },
+        "noise": 0.07,
+    },
+    "tokyo": {
+        "label": "Tokyo",
+        "aliases": ["tokyo"],
+        "base": {"vegetation": 22.0, "water": 7.0, "urban": 46.0, "ice": 0.5},
+        "change": {"vegetation": -4.0, "water": -1.0, "urban": 9.0, "ice": -0.2},
+        "pattern": {
+            "urban_centers": [(0.55, 0.55), (0.70, 0.45), (0.45, 0.65)],
+            "veg_centers": [(0.25, 0.70)],
+            "water_centers": [(0.85, 0.55)],
+            "water_pattern": "coast_east",
+            "urban_spread": 0.24,
+            "veg_spread": 0.20,
+            "water_spread": 0.16,
+        },
+        "noise": 0.05,
+    },
+    "london": {
+        "label": "London",
+        "aliases": ["london"],
+        "base": {"vegetation": 35.0, "water": 9.0, "urban": 26.0, "ice": 0.5},
+        "change": {"vegetation": -2.0, "water": 0.0, "urban": 4.0, "ice": -0.1},
+        "pattern": {
+            "urban_centers": [(0.50, 0.50), (0.62, 0.58)],
+            "veg_centers": [(0.30, 0.70), (0.75, 0.25)],
+            "water_centers": [(0.50, 0.50)],
+            "water_pattern": "river_vertical",
+            "urban_spread": 0.18,
+            "veg_spread": 0.26,
+            "water_spread": 0.12,
+        },
+        "noise": 0.05,
+    },
+    "moscow": {
+        "label": "Moscow",
+        "aliases": ["moscow"],
+        "base": {"vegetation": 45.0, "water": 7.0, "urban": 20.0, "ice": 4.0},
+        "change": {"vegetation": -1.0, "water": 0.0, "urban": 4.0, "ice": -1.0},
+        "pattern": {
+            "urban_centers": [(0.55, 0.45)],
+            "veg_centers": [(0.30, 0.75), (0.75, 0.30)],
+            "water_centers": [(0.40, 0.60)],
+            "ice_centers": [(0.85, 0.15)],
+            "water_pattern": "lake",
+            "urban_spread": 0.16,
+            "veg_spread": 0.30,
+            "water_spread": 0.16,
+        },
+        "noise": 0.08,
+        "seasonality": {"vegetation": 2.2, "water": 0.8},
+    },
+    "bishkek": {
+        "label": "Bishkek",
+        "aliases": ["bishkek"],
+        "base": {"vegetation": 50.0, "water": 8.0, "urban": 14.0, "ice": 3.0},
+        "change": {"vegetation": -2.0, "water": 1.0, "urban": 3.0, "ice": -0.5},
+        "pattern": {
+            "urban_centers": [(0.45, 0.55)],
+            "veg_centers": [(0.35, 0.70), (0.70, 0.65)],
+            "water_centers": [(0.60, 0.40), (0.20, 0.30)],
+            "water_pattern": "lake",
+            "urban_spread": 0.14,
+            "veg_spread": 0.34,
+            "water_spread": 0.18,
+        },
+        "noise": 0.10,
+    },
+    "almaty": {
+        "label": "Almaty",
+        "aliases": ["almaty"],
+        "base": {"vegetation": 46.0, "water": 7.0, "urban": 18.0, "ice": 3.0},
+        "change": {"vegetation": -3.0, "water": -0.5, "urban": 5.0, "ice": -0.8},
+        "pattern": {
+            "urban_centers": [(0.50, 0.55)],
+            "veg_centers": [(0.30, 0.70), (0.80, 0.65)],
+            "water_centers": [(0.65, 0.35)],
+            "ice_centers": [(0.80, 0.20)],
+            "water_pattern": "lake",
+            "urban_spread": 0.16,
+            "veg_spread": 0.32,
+            "water_spread": 0.16,
+        },
+        "noise": 0.09,
+    },
+    "new york": {
+        "label": "New York",
+        "aliases": ["new york", "nyc"],
+        "base": {"vegetation": 32.0, "water": 10.0, "urban": 33.0, "ice": 1.0},
+        "change": {"vegetation": -4.0, "water": -0.5, "urban": 7.0, "ice": -0.2},
+        "pattern": {
+            "urban_centers": [(0.55, 0.45), (0.68, 0.60)],
+            "veg_centers": [(0.30, 0.75)],
+            "water_centers": [(0.15, 0.55)],
+            "water_pattern": "coast_east",
+            "urban_spread": 0.20,
+            "veg_spread": 0.24,
+            "water_spread": 0.18,
+        },
+        "noise": 0.06,
+    },
+}
+
+DEMO_PROFILE_COORDS = {
+    "san francisco": (37.7749, -122.4194),
+    "los angeles": (34.0522, -118.2437),
+    "new york": (40.7128, -74.0060),
+    "london": (51.5074, -0.1278),
+    "tokyo": (35.6895, 139.6917),
+    "moscow": (55.7558, 37.6173),
+    "bishkek": (42.8746, 74.5698),
+    "almaty": (43.2389, 76.8897),
 }
 
 
@@ -64,6 +212,171 @@ def _validate_coordinates(lat, lon):
     if lat is None or lon is None:
         return False
     return -90.0 <= float(lat) <= 90.0 and -180.0 <= float(lon) <= 180.0
+
+
+def _stable_seed(value):
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def _profile_copy(key, profile):
+    clone = dict(profile)
+    clone["key"] = key
+    return clone
+
+
+def _demo_profile_for_location(location):
+    if not location:
+        return _profile_copy("san francisco", DEMO_PROFILES["san francisco"])
+
+    name = normalize_query(location.get("name")) if isinstance(location, dict) else None
+    normalized = name.lower() if name else ""
+    for profile_key, profile in DEMO_PROFILES.items():
+        aliases = profile.get("aliases", [])
+        if any(alias in normalized for alias in aliases):
+            return _profile_copy(profile_key, profile)
+
+    lat = location.get("lat") if isinstance(location, dict) else None
+    lon = location.get("lon") if isinstance(location, dict) else None
+    if lat is not None and lon is not None and DEMO_PROFILE_COORDS:
+        nearest = min(
+            DEMO_PROFILE_COORDS,
+            key=lambda key: (lat - DEMO_PROFILE_COORDS[key][0]) ** 2 + (lon - DEMO_PROFILE_COORDS[key][1]) ** 2,
+        )
+        return _profile_copy(nearest, DEMO_PROFILES[nearest])
+
+    return _profile_copy("san francisco", DEMO_PROFILES["san francisco"])
+
+
+def _clamp_value(value, minimum, maximum):
+    return max(minimum, min(float(value), maximum))
+
+
+def _profile_targets(profile, year, year_start, year_end):
+    span = max(year_end - year_start, 1)
+    factor = (year - year_start) / span
+    targets = {}
+    for key in ["vegetation", "water", "urban", "ice"]:
+        base = profile["base"].get(key, 0.0)
+        change = profile["change"].get(key, 0.0)
+        targets[key] = base + change * factor
+
+    seasonality = profile.get("seasonality", {})
+    if seasonality:
+        phase = 2 * np.pi * factor
+        targets["vegetation"] += seasonality.get("vegetation", 0.0) * np.sin(phase)
+        targets["water"] += seasonality.get("water", 0.0) * np.cos(phase)
+
+    for key in targets:
+        targets[key] = _clamp_value(targets[key], 0.2, 80.0)
+
+    total = sum(targets.values())
+    if total > 95.0:
+        scale = 95.0 / total
+        for key in targets:
+            targets[key] = targets[key] * scale
+
+    return targets
+
+
+def _gaussian_field(centers, sigma, shape, yy, xx):
+    field = np.zeros(shape, dtype=np.float32)
+    if not centers or sigma <= 0:
+        return field
+    for center in centers:
+        cx = int(center[0] * (shape[1] - 1))
+        cy = int(center[1] * (shape[0] - 1))
+        dist = (xx - cx) ** 2 + (yy - cy) ** 2
+        field += np.exp(-dist / (2 * sigma**2))
+    return field
+
+
+def _water_pattern_field(pattern, shape, yy, xx):
+    h, w = shape
+    field = np.zeros(shape, dtype=np.float32)
+    if pattern == "coast_west":
+        field += np.tile(np.linspace(1.0, 0.0, w), (h, 1))
+    elif pattern == "coast_east":
+        field += np.tile(np.linspace(0.0, 1.0, w), (h, 1))
+    elif pattern == "coast_south":
+        field += np.tile(np.linspace(0.0, 1.0, h), (w, 1)).T
+    elif pattern == "river_vertical":
+        sigma = max(int(0.04 * w), 2)
+        field += np.exp(-((xx - w * 0.5) ** 2) / (2 * sigma**2))
+    elif pattern == "river_horizontal":
+        sigma = max(int(0.04 * h), 2)
+        field += np.exp(-((yy - h * 0.5) ** 2) / (2 * sigma**2))
+    return field
+
+
+def _select_mask(score, fraction, available):
+    if fraction <= 0 or not available.any():
+        return np.zeros_like(available, dtype=bool)
+    fraction = min(float(fraction), float(available.mean()))
+    if fraction <= 0:
+        return np.zeros_like(available, dtype=bool)
+    score = score.copy()
+    score[~available] = -np.inf
+    threshold = np.quantile(score[available], 1.0 - fraction)
+    return (score >= threshold) & available
+
+
+def _generate_demo_scene(profile, year, year_start, year_end, size=256):
+    key = profile.get("key", "demo")
+    seed = _stable_seed(f"{key}:{year}")
+    rng = np.random.default_rng(seed)
+    h = w = size
+    yy, xx = np.mgrid[0:h, 0:w]
+
+    targets = _profile_targets(profile, year, year_start, year_end)
+    factor = (year - year_start) / max(year_end - year_start, 1)
+    pattern = profile.get("pattern", {})
+
+    urban_spread = pattern.get("urban_spread", 0.18) * (1.0 + 0.4 * factor)
+    veg_spread = pattern.get("veg_spread", 0.28) * (1.0 - 0.1 * factor)
+    water_spread = pattern.get("water_spread", 0.18)
+
+    noise = rng.normal(0, 1, size=(h, w)).astype(np.float32)
+    urban_score = _gaussian_field(pattern.get("urban_centers", []), urban_spread * w, (h, w), yy, xx)
+    water_score = _gaussian_field(pattern.get("water_centers", []), water_spread * w, (h, w), yy, xx)
+    veg_score = _gaussian_field(pattern.get("veg_centers", []), veg_spread * w, (h, w), yy, xx)
+    ice_score = _gaussian_field(pattern.get("ice_centers", []), 0.14 * w, (h, w), yy, xx)
+
+    water_score += _water_pattern_field(pattern.get("water_pattern"), (h, w), yy, xx)
+    urban_score += noise * 0.25
+    veg_score += noise * 0.15 - urban_score * 0.08
+    water_score += noise * 0.05
+
+    available = np.ones((h, w), dtype=bool)
+    water_mask = _select_mask(water_score, targets["water"] / 100.0, available)
+    available[water_mask] = False
+    ice_mask = _select_mask(ice_score, targets["ice"] / 100.0, available)
+    available[ice_mask] = False
+    urban_mask = _select_mask(urban_score, targets["urban"] / 100.0, available)
+    available[urban_mask] = False
+    veg_mask = _select_mask(veg_score, targets["vegetation"] / 100.0, available)
+
+    base_level = 0.12 + max(0.0, 40.0 - profile["base"].get("vegetation", 35.0)) * 0.0015
+    base_noise = profile.get("noise", 0.06)
+    base = rng.normal(base_level, base_noise, size=(h, w))
+    red = base.copy()
+    green = base.copy()
+    blue = base.copy()
+    nir = base.copy()
+    swir = base.copy()
+
+    _apply_class(red, green, blue, nir, swir, veg_mask, (0.12, 0.45, 0.10, 0.68, 0.20), rng)
+    _apply_class(red, green, blue, nir, swir, water_mask, (0.04, 0.10, 0.22, 0.02, 0.05), rng)
+    _apply_class(red, green, blue, nir, swir, urban_mask, (0.62, 0.22, 0.45, 0.30, 0.55), rng)
+    _apply_class(red, green, blue, nir, swir, ice_mask, (0.85, 0.90, 0.92, 0.84, 0.70), rng)
+
+    red = np.clip(red, 0, 1).astype(np.float32)
+    green = np.clip(green, 0, 1).astype(np.float32)
+    blue = np.clip(blue, 0, 1).astype(np.float32)
+    nir = np.clip(nir, 0, 1).astype(np.float32)
+    swir = np.clip(swir, 0, 1).astype(np.float32)
+
+    return Scene(year=year, red=red, green=green, blue=blue, nir=nir, swir=swir, source="demo_profile")
 
 
 @dataclass
@@ -331,7 +644,7 @@ def _load_scene(year):
     return Scene(year=year, red=red, green=green, blue=blue, nir=nir, swir=swir, source="synthetic")
 
 
-def _load_scene_for_year(location, year, size=256):
+def _load_scene_for_year(location, year, year_start=None, year_end=None, size=256):
     payload = sentinel_client.fetch_sentinel_bands(location, year, size=(size, size))
     if payload:
         return Scene(
@@ -343,7 +656,10 @@ def _load_scene_for_year(location, year, size=256):
             swir=payload["swir"],
             source="sentinel",
         )
-    return _load_scene(year)
+    profile = _demo_profile_for_location(location)
+    year_start = year if year_start is None else int(year_start)
+    year_end = year if year_end is None else int(year_end)
+    return _generate_demo_scene(profile, year, year_start, year_end, size=size)
 
 
 def _encode_image(image):
@@ -487,7 +803,7 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
     sources = {}
 
     for year in years:
-        scene = _load_scene_for_year(location, year)
+        scene = _load_scene_for_year(location, year, year_start=year_start, year_end=year_end)
         year_scenes[year] = scene
         sources[str(year)] = scene.source
         classes = _classify(scene)
@@ -571,8 +887,10 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
     }
 
     notices = []
+    demo_profile = None
     if any(value != "sentinel" for value in sources.values()):
         notices.append({"code": "fallback_data", "message": "Using demo fallback data for this location."})
+        demo_profile = _demo_profile_for_location(location)
 
     source_mode = _summarize_source_mode(sources)
 
@@ -584,6 +902,7 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
         "sources": sources,
         "source_mode": source_mode,
         "notices": notices,
+        "demo_profile": demo_profile["label"] if demo_profile else None,
         "stats": {"start": stats_start, "end": stats_end, "by_year": {str(y): year_stats[y] for y in years}},
         "changes": changes,
         "indices": {
@@ -940,6 +1259,7 @@ def analysis_payload(analysis, mode):
         "years": analysis["years"],
         "sources": analysis.get("sources", {}),
         "source": analysis.get("source_mode", "demo"),
+        "demo_profile": analysis.get("demo_profile"),
         "notices": analysis.get("notices", []),
         "messages": analysis.get("notices", []),
         "stats": analysis["stats"],
