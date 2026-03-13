@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 import ai_module
 import cache
+import sentinel_config
 
 logger = logging.getLogger("climatelens")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -68,12 +69,21 @@ def index():
 
 @app.post("/analyze_location")
 def analyze_location(req: AnalyzeRequest):
-    location, error = ai_module.resolve_location_info(req.query, req.lat, req.lon)
-    logger.info("analyze_location query=%s lat=%s lon=%s", req.query, req.lat, req.lon)
+    normalized_query = ai_module.normalize_query(req.query)
+    location, error = ai_module.resolve_location_info(normalized_query, req.lat, req.lon)
+    logger.info("analyze_location query=%s normalized=%s lat=%s lon=%s", req.query, normalized_query, req.lat, req.lon)
     if error:
         return _error_response("location_not_found", error, status_code=404)
 
-    logger.info("resolved location=%s (%s, %s) source=%s", location["name"], location["lat"], location["lon"], location.get("source"))
+    logger.info(
+        "resolved location=%s (%s, %s) source=%s years=%s-%s",
+        location["name"],
+        location["lat"],
+        location["lon"],
+        location.get("source"),
+        req.year_start,
+        req.year_end,
+    )
     cache_key = _cache_key(location, req.year_start, req.year_end)
     analysis = cache.get_cached_analysis(cache_key)
     cached = True
@@ -84,14 +94,18 @@ def analyze_location(req: AnalyzeRequest):
     cache.add_history(cache_key, location, req.year_start, req.year_end)
     payload = ai_module.analysis_payload(analysis, mode=req.mode)
     payload["cached"] = cached
-    if payload.get("notices"):
-        logger.info("fallback notice=%s", payload["notices"])
+    payload["success"] = True
+    if payload.get("messages"):
+        logger.info("fallback notice=%s", payload["messages"])
+    if payload.get("source") and payload["source"] != "sentinel":
+        logger.info("analysis source_mode=%s", payload["source"])
     return payload
 
 
 @app.post("/get_charts_data")
 def get_charts_data(req: AnalyzeRequest):
-    location, error = ai_module.resolve_location_info(req.query, req.lat, req.lon)
+    normalized_query = ai_module.normalize_query(req.query)
+    location, error = ai_module.resolve_location_info(normalized_query, req.lat, req.lon)
     if error:
         return _error_response("location_not_found", error, status_code=404)
     cache_key = _cache_key(location, req.year_start, req.year_end)
@@ -99,28 +113,50 @@ def get_charts_data(req: AnalyzeRequest):
     if analysis is None:
         analysis = ai_module.analyze_location(location, req.year_start, req.year_end)
         cache.set_cached_analysis(cache_key, analysis)
-    return ai_module.charts_payload(analysis)
+    payload = ai_module.charts_payload(analysis)
+    payload["success"] = True
+    return payload
 
 
 @app.post("/ai_explanation")
 def ai_explanation(req: ExplainRequest):
-    logger.info("assistant question=%s analysis_id=%s", req.question, req.analysis_id)
-    location, error = ai_module.resolve_location_info(req.query, req.lat, req.lon)
+    normalized_query = ai_module.normalize_query(req.query)
+    logger.info(
+        "assistant question=%s analysis_id=%s year=%s mode=%s",
+        req.question,
+        req.analysis_id,
+        req.timeline_year,
+        req.mode,
+    )
+    location, error = ai_module.resolve_location_info(normalized_query, req.lat, req.lon)
     if error:
         return _error_response("location_not_found", error, status_code=404)
+    logger.info(
+        "assistant location=%s (%s, %s) years=%s-%s",
+        location["name"],
+        location["lat"],
+        location["lon"],
+        req.year_start,
+        req.year_end,
+    )
     cache_key = _cache_key(location, req.year_start, req.year_end)
     analysis = cache.get_cached_analysis(cache_key)
     if analysis is None:
         if req.require_cached:
-            return {"summary": "Please analyze a location first."}
+            return {"success": False, "summary": "Please analyze a location first.", "messages": []}
         analysis = ai_module.analyze_location(location, req.year_start, req.year_end)
         cache.set_cached_analysis(cache_key, analysis)
-    return ai_module.answer_question(
+    source_mode = analysis.get("source_mode", "demo")
+    if source_mode != "sentinel":
+        logger.info("assistant using fallback source=%s", source_mode)
+    response = ai_module.answer_question(
         analysis,
         question=req.question,
         mode=req.mode,
         year_focus=req.timeline_year,
     )
+    response["success"] = True
+    return response
 
 
 @app.get("/history")
@@ -129,8 +165,12 @@ def history(limit: int = 20):
 
 
 def _cache_key(location, year_start, year_end):
-    return f"{location['lat']:.4f},{location['lon']:.4f}:{year_start}-{year_end}"
+    data_mode = "sentinel" if sentinel_config.is_configured() else "demo"
+    return f"{location['lat']:.4f},{location['lon']:.4f}:{year_start}-{year_end}:{data_mode}"
 
 
 def _error_response(code, message, status_code=400):
-    return JSONResponse(status_code=status_code, content={"error": {"code": code, "message": message}})
+    return JSONResponse(
+        status_code=status_code,
+        content={"success": False, "error": {"code": code, "message": message}, "messages": []},
+    )

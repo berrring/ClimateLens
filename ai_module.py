@@ -40,17 +40,30 @@ DEFAULT_YEAR_END = 2024
 DEFAULT_LOCATION = {"name": "San Francisco, CA", "lat": 37.7749, "lon": -122.4194}
 
 CITY_DB = {
-    "san francisco": (37.7749, -122.4194),
-    "new york": (40.7128, -74.0060),
-    "london": (51.5074, -0.1278),
-    "tokyo": (35.6895, 139.6917),
-    "bishkek": (42.8746, 74.5698),
-    "almaty": (43.2389, 76.8897),
-    "nairobi": (-1.2921, 36.8219),
-    "sydney": (-33.8688, 151.2093),
-    "reykjavik": (64.1466, -21.9426),
-    "mumbai": (19.0760, 72.8777),
+    "san francisco": ("San Francisco, CA", 37.7749, -122.4194),
+    "new york": ("New York, NY", 40.7128, -74.0060),
+    "london": ("London, UK", 51.5074, -0.1278),
+    "tokyo": ("Tokyo, JP", 35.6895, 139.6917),
+    "bishkek": ("Bishkek, KG", 42.8746, 74.5698),
+    "almaty": ("Almaty, KZ", 43.2389, 76.8897),
+    "nairobi": ("Nairobi, KE", -1.2921, 36.8219),
+    "sydney": ("Sydney, AU", -33.8688, 151.2093),
+    "reykjavik": ("Reykjavik, IS", 64.1466, -21.9426),
+    "mumbai": ("Mumbai, IN", 19.0760, 72.8777),
 }
+
+
+def normalize_query(query):
+    if query is None:
+        return None
+    normalized = " ".join(str(query).strip().split())
+    return normalized or None
+
+
+def _validate_coordinates(lat, lon):
+    if lat is None or lon is None:
+        return False
+    return -90.0 <= float(lat) <= 90.0 and -180.0 <= float(lon) <= 180.0
 
 
 @dataclass
@@ -105,31 +118,41 @@ def _resolve_years(year_start, year_end):
 
 def resolve_location_info(query=None, lat=None, lon=None):
     if lat is not None and lon is not None:
+        if not _validate_coordinates(lat, lon):
+            return (None, "Coordinates out of range. Use lat (-90..90) and lon (-180..180).")
         return (
-            {"name": f"{lat:.4f}, {lon:.4f}", "lat": float(lat), "lon": float(lon), "source": "coords"},
+            {"name": f"{float(lat):.4f}, {float(lon):.4f}", "lat": float(lat), "lon": float(lon), "source": "coords"},
             None,
         )
 
-    if query:
-        m = re.match(r"\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*", query)
+    normalized = normalize_query(query)
+    if normalized:
+        m = re.match(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", normalized)
         if m:
+            lat_val = float(m.group(1))
+            lon_val = float(m.group(2))
+            if not _validate_coordinates(lat_val, lon_val):
+                return (None, "Coordinates out of range. Use lat (-90..90) and lon (-180..180).")
             return (
                 {
-                    "name": f"{m.group(1)}, {m.group(2)}",
-                    "lat": float(m.group(1)),
-                    "lon": float(m.group(2)),
+                    "name": f"{lat_val:.4f}, {lon_val:.4f}",
+                    "lat": lat_val,
+                    "lon": lon_val,
                     "source": "coords",
                 },
                 None,
             )
-        key = query.strip().lower()
+        key = normalized.lower()
         if key in CITY_DB:
-            lat, lon = CITY_DB[key]
-            return ({"name": query.strip(), "lat": float(lat), "lon": float(lon), "source": "city_db"}, None)
+            name, lat_val, lon_val = CITY_DB[key]
+            return ({"name": name, "lat": float(lat_val), "lon": float(lon_val), "source": "city_db"}, None)
 
-        geocoded = geocode_city(query.strip())
+        geocoded = geocode_city(normalized)
         if geocoded:
-            return ({"name": geocoded["name"], "lat": geocoded["lat"], "lon": geocoded["lon"], "source": "geocode"}, None)
+            return (
+                {"name": geocoded["name"], "lat": geocoded["lat"], "lon": geocoded["lon"], "source": "geocode"},
+                None,
+            )
 
         return (None, "Location not found. Try another city or use coordinates.")
 
@@ -551,12 +574,15 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
     if any(value != "sentinel" for value in sources.values()):
         notices.append({"code": "fallback_data", "message": "Using demo fallback data for this location."})
 
+    source_mode = _summarize_source_mode(sources)
+
     analysis = {
         "analysis_id": uuid.uuid4().hex,
         "location": location,
         "bbox": location_to_bbox(location["lat"], location["lon"]),
         "years": years,
         "sources": sources,
+        "source_mode": source_mode,
         "notices": notices,
         "stats": {"start": stats_start, "end": stats_end, "by_year": {str(y): year_stats[y] for y in years}},
         "changes": changes,
@@ -586,6 +612,19 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
     }
 
     return analysis
+
+
+def _summarize_source_mode(sources):
+    if not sources:
+        return "demo"
+    values = {value for value in sources.values()}
+    if values == {"sentinel"}:
+        return "sentinel"
+    if values == {"synthetic"}:
+        return "demo"
+    if "sentinel" in values and len(values) > 1:
+        return "mixed"
+    return "demo"
 
 
 def generate_recommendations(changes):
@@ -714,91 +753,159 @@ def generate_explanation(analysis, mode="simple", question=None, year_focus=None
 
 
 def answer_question(analysis, question=None, mode="simple", year_focus=None):
-    if not question:
-        return generate_explanation(analysis, mode=mode, question=question, year_focus=year_focus)
+    if not question or not str(question).strip():
+        return {"summary": "Please analyze a location first.", "recommendations": [], "insights": {}}
 
     q = question.strip().lower()
     explanation = generate_explanation(analysis, mode=mode, question=question, year_focus=year_focus)
 
     changes = analysis["changes"]
-    stats_start = analysis["stats"]["start"]
     stats_end = analysis["stats"]["end"]
     year_start = analysis["years"][0]
     year_end = analysis["years"][-1]
+    location_name = analysis["location"]["name"]
 
     by_year = analysis.get("stats", {}).get("by_year", {})
     idx_by_year = analysis.get("indices", {}).get("by_year", {})
-    focus_year = str(year_focus) if year_focus is not None else str(year_end)
-    focus_stats = by_year.get(focus_year, stats_end)
-    focus_indices = idx_by_year.get(focus_year, None)
+    forecast_years = analysis.get("forecast_years", [])
+    forecast = analysis.get("forecast", {})
+
+    focus_year = year_focus if year_focus is not None else year_end
+    focus_year_int = int(focus_year)
+    focus_key = str(focus_year_int)
+    focus_is_forecast = focus_year_int > year_end and focus_year_int in forecast_years
+
+    def _forecast_value(metric):
+        if focus_year_int not in forecast_years:
+            return None
+        idx = forecast_years.index(focus_year_int)
+        values = forecast.get(metric, [])
+        if idx < len(values):
+            return values[idx]
+        return None
+
+    def _metric_value(metric):
+        if focus_key in by_year:
+            return by_year[focus_key].get(metric), False
+        forecast_value = _forecast_value(metric)
+        if forecast_value is not None:
+            return forecast_value, True
+        return stats_end.get(metric), False
+
+    focus_label = f"{focus_year_int} (forecast)" if focus_is_forecast else str(focus_year_int)
+    focus_stats = by_year.get(focus_key, stats_end)
+    focus_indices = idx_by_year.get(focus_key, None)
+
+    def _two_sentences(first, second):
+        return f"{first.strip()} {second.strip()}"
 
     key_name, delta = max(changes.items(), key=lambda x: abs(x[1]))
     delta_desc = f"{delta:+.1f} pp"
+    key_label = key_name.replace("_", " ")
 
-    if any(term in q for term in ["biggest", "largest", "most change"]):
-        summary = (
-            f"The biggest change is {key_name} at {delta_desc} between {year_start} and {year_end}. "
-            f"Vegetation is {changes['vegetation']:+.1f} pp and urban is {changes['urban']:+.1f} pp."
+    topic_flags = {
+        "biggest": any(term in q for term in ["biggest", "largest", "most change"]),
+        "vegetation": "vegetation" in q,
+        "water": "water" in q,
+        "urban": "urban" in q or "urbanization" in q,
+        "ndvi": "ndvi" in q,
+        "ndwi": "ndwi" in q,
+        "ndbi": "ndbi" in q,
+        "cause": any(term in q for term in ["why", "cause", "driver"]),
+        "recommend": any(term in q for term in ["monitor", "should", "recommend"]),
+    }
+
+    if not any(topic_flags.values()):
+        summary = _two_sentences(
+            "I can answer about vegetation, water, urban growth, NDVI/NDWI/NDBI, biggest changes, and recommendations.",
+            f"Try asking about vegetation change in {location_name} or the biggest change from {year_start} to {year_end}.",
         )
         return {"summary": summary, "recommendations": explanation["recommendations"], "insights": explanation["insights"]}
 
-    if "vegetation" in q:
-        summary = (
-            f"Vegetation changed {changes['vegetation']:+.1f} pp between {year_start} and {year_end}. "
-            f"Current vegetation share is {focus_stats['vegetation']:.1f}%."
+    if topic_flags["biggest"]:
+        summary = _two_sentences(
+            f"In {location_name}, the biggest change from {year_start} to {year_end} is {key_label} ({delta_desc}).",
+            f"Vegetation is {changes['vegetation']:+.1f} pp, urban is {changes['urban']:+.1f} pp, and water is {changes['water']:+.1f} pp.",
         )
-        if focus_indices:
-            summary += f" NDVI mean is {focus_indices['ndvi_mean']:.2f}."
         return {"summary": summary, "recommendations": explanation["recommendations"], "insights": explanation["insights"]}
 
-    if "urban" in q or "urbanization" in q:
+    if topic_flags["vegetation"]:
+        veg_value, _ = _metric_value("vegetation")
+        ndvi_value = focus_indices["ndvi_mean"] if focus_indices else None
+        second = f"Selected year {focus_label}: vegetation {veg_value:.1f}%." if veg_value is not None else f"Selected year {focus_label}: vegetation data is unavailable."
+        if ndvi_value is not None:
+            second = f"{second} NDVI {ndvi_value:.2f}."
+        summary = _two_sentences(
+            f"In {location_name}, vegetation changed {changes['vegetation']:+.1f} pp between {year_start} and {year_end}.",
+            second,
+        )
+        return {"summary": summary, "recommendations": explanation["recommendations"], "insights": explanation["insights"]}
+
+    if topic_flags["urban"]:
+        urban_value, _ = _metric_value("urban")
+        ndbi_value = focus_indices["ndbi_mean"] if focus_indices else None
         trend = "increasing" if changes["urban"] > 0 else "decreasing"
-        summary = (
-            f"Urban cover is {trend} ({changes['urban']:+.1f} pp) from {year_start} to {year_end}. "
-            f"Current urban share is {focus_stats['urban']:.1f}%."
+        second = f"Selected year {focus_label}: urban {urban_value:.1f}%." if urban_value is not None else f"Selected year {focus_label}: urban data is unavailable."
+        if ndbi_value is not None:
+            second = f"{second} NDBI {ndbi_value:.2f}."
+        summary = _two_sentences(
+            f"In {location_name}, urban cover is {trend} ({changes['urban']:+.1f} pp) from {year_start} to {year_end}.",
+            second,
         )
-        if focus_indices:
-            summary += f" NDBI mean is {focus_indices['ndbi_mean']:.2f}."
         return {"summary": summary, "recommendations": explanation["recommendations"], "insights": explanation["insights"]}
 
-    if "water" in q:
-        summary = (
-            f"Water cover changed {changes['water']:+.1f} pp between {year_start} and {year_end}. "
-            f"Current water share is {focus_stats['water']:.1f}%."
+    if topic_flags["water"]:
+        water_value, _ = _metric_value("water")
+        ndwi_value = focus_indices["ndwi_mean"] if focus_indices else None
+        second = f"Selected year {focus_label}: water {water_value:.1f}%." if water_value is not None else f"Selected year {focus_label}: water data is unavailable."
+        if ndwi_value is not None:
+            second = f"{second} NDWI {ndwi_value:.2f}."
+        summary = _two_sentences(
+            f"In {location_name}, water cover changed {changes['water']:+.1f} pp between {year_start} and {year_end}.",
+            second,
         )
-        if focus_indices:
-            summary += f" NDWI mean is {focus_indices['ndwi_mean']:.2f}."
         return {"summary": summary, "recommendations": explanation["recommendations"], "insights": explanation["insights"]}
 
-    if "ndvi" in q:
-        ndvi_text = (
-            "NDVI measures vegetation health using near-infrared and red reflectance."
+    if topic_flags["ndvi"]:
+        ndvi_value = focus_indices["ndvi_mean"] if focus_indices else None
+        second = f"In {location_name}, NDVI is {ndvi_value:.2f} for {focus_label}." if ndvi_value is not None else f"NDVI is unavailable for {focus_label}."
+        summary = _two_sentences(
+            "NDVI measures vegetation health using near infrared and red reflectance.",
+            f"{second} Vegetation changed {changes['vegetation']:+.1f} pp since {year_start}.",
         )
-        if focus_indices:
-            ndvi_text += f" The current NDVI mean is {focus_indices['ndvi_mean']:.2f}."
-        summary = f"{ndvi_text} Vegetation changed {changes['vegetation']:+.1f} pp since {year_start}."
         return {"summary": summary, "recommendations": explanation["recommendations"], "insights": explanation["insights"]}
 
-    if "ndwi" in q:
-        ndwi_text = "NDWI highlights surface water using green and near-infrared reflectance."
-        if focus_indices:
-            ndwi_text += f" The current NDWI mean is {focus_indices['ndwi_mean']:.2f}."
-        summary = f"{ndwi_text} Water changed {changes['water']:+.1f} pp since {year_start}."
+    if topic_flags["ndwi"]:
+        ndwi_value = focus_indices["ndwi_mean"] if focus_indices else None
+        second = f"In {location_name}, NDWI is {ndwi_value:.2f} for {focus_label}." if ndwi_value is not None else f"NDWI is unavailable for {focus_label}."
+        summary = _two_sentences(
+            "NDWI highlights surface water using green and near infrared reflectance.",
+            f"{second} Water changed {changes['water']:+.1f} pp since {year_start}.",
+        )
         return {"summary": summary, "recommendations": explanation["recommendations"], "insights": explanation["insights"]}
 
-    if "ndbi" in q:
-        ndbi_text = "NDBI indicates built-up areas using SWIR and near-infrared reflectance."
-        if focus_indices:
-            ndbi_text += f" The current NDBI mean is {focus_indices['ndbi_mean']:.2f}."
-        summary = f"{ndbi_text} Urban change is {changes['urban']:+.1f} pp since {year_start}."
+    if topic_flags["ndbi"]:
+        ndbi_value = focus_indices["ndbi_mean"] if focus_indices else None
+        second = f"In {location_name}, NDBI is {ndbi_value:.2f} for {focus_label}." if ndbi_value is not None else f"NDBI is unavailable for {focus_label}."
+        summary = _two_sentences(
+            "NDBI indicates built-up areas using SWIR and near infrared reflectance.",
+            f"{second} Urban change is {changes['urban']:+.1f} pp since {year_start}.",
+        )
         return {"summary": summary, "recommendations": explanation["recommendations"], "insights": explanation["insights"]}
 
-    if any(term in q for term in ["why", "cause", "driver"]):
-        summary = explanation["insights"]["causes"]
+    if topic_flags["cause"]:
+        cause = explanation["insights"]["causes"].split(".")[0].strip()
+        summary = _two_sentences(
+            f"Possible drivers in {location_name}: {cause}.",
+            f"Key changes from {year_start} to {year_end} include vegetation {changes['vegetation']:+.1f} pp and urban {changes['urban']:+.1f} pp.",
+        )
         return {"summary": summary, "recommendations": explanation["recommendations"], "insights": explanation["insights"]}
 
-    if any(term in q for term in ["monitor", "should", "recommend"]):
-        summary = f"Key recommendation: {explanation['recommendations'][0]}"
+    if topic_flags["recommend"]:
+        summary = _two_sentences(
+            f"Recommendation: {explanation['recommendations'][0]}.",
+            f"This targets {key_label} change in {location_name} for {year_start} to {year_end}.",
+        )
         return {"summary": summary, "recommendations": explanation["recommendations"], "insights": explanation["insights"]}
 
     return explanation
@@ -817,16 +924,28 @@ def charts_payload(analysis):
 
 def analysis_payload(analysis, mode):
     explanation = generate_explanation(analysis, mode=mode)
+    location = analysis["location"]
+    coordinates = {"lat": float(location["lat"]), "lon": float(location["lon"])}
+    metrics = {
+        "changes": analysis["changes"],
+        "indices": analysis["indices"],
+        "stats": analysis["stats"],
+    }
     return {
+        "success": True,
         "analysis_id": analysis["analysis_id"],
-        "location": analysis["location"],
+        "location": location,
+        "coordinates": coordinates,
         "bbox": analysis["bbox"],
         "years": analysis["years"],
         "sources": analysis.get("sources", {}),
+        "source": analysis.get("source_mode", "demo"),
         "notices": analysis.get("notices", []),
+        "messages": analysis.get("notices", []),
         "stats": analysis["stats"],
         "changes": analysis["changes"],
         "indices": analysis["indices"],
+        "metrics": metrics,
         "overlays": analysis["overlays"],
         "previews": analysis["previews"],
         "timeline": analysis["timeline"],

@@ -54,6 +54,17 @@ function formatChange(value) {
   return `${sign}${value.toFixed(1)} pp`;
 }
 
+function getForecastValue(forecastYears, forecastValues, year) {
+  if (!Array.isArray(forecastYears) || !Array.isArray(forecastValues)) {
+    return null;
+  }
+  const idx = forecastYears.indexOf(year);
+  if (idx === -1 || idx >= forecastValues.length) {
+    return null;
+  }
+  return forecastValues[idx];
+}
+
 function safeRenderChart({
   containerId,
   label,
@@ -65,6 +76,10 @@ function safeRenderChart({
   markerYear,
   mode,
 }) {
+  if (!window.Plotly || typeof Plotly.react !== "function") {
+    console.warn("[ClimateLens] Plotly unavailable, skipping chart render.");
+    return false;
+  }
   const el = document.getElementById(containerId);
   if (!el) {
     console.warn(`[ClimateLens] Chart container missing: ${containerId}`, { mode });
@@ -173,7 +188,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!analysis) {
+    if (!analysis || !analysis.timeline || !Array.isArray(analysis.timeline.years)) {
       return;
     }
     const timelineYears = analysis.timeline.years;
@@ -183,7 +198,7 @@ function App() {
   }, [analysis]);
 
   useEffect(() => {
-    if (!analysis) {
+    if (!analysis || !analysis.timeline || !Array.isArray(analysis.timeline.years)) {
       return;
     }
     const year = analysis.timeline.years[timelineIndex];
@@ -302,25 +317,34 @@ function App() {
     setErrorMessage("");
     setNoticeMessage("");
     setAnswer("");
-    logDebug("Analyze requested", { query, mode });
+    const normalizedQuery = query.trim();
+    logDebug("Analyze requested", { query: normalizedQuery, mode });
     try {
       const payload = {
-        query: query || null,
+        query: normalizedQuery || null,
         mode,
         year_start: DEFAULT_YEAR_START,
         year_end: DEFAULT_YEAR_END,
       };
       const analysisResponse = await postJSON("/analyze_location", payload);
       const chartsResponse = await postJSON("/get_charts_data", payload);
+      if (analysisResponse && analysisResponse.success === false) {
+        setErrorMessage(analysisResponse.error ? analysisResponse.error.message : "Unable to analyze location.");
+        setAnalysis(null);
+        setCharts(null);
+        return;
+      }
       setAnalysis(analysisResponse);
       setCharts(chartsResponse);
       logDebug("Analysis updated", {
         location: analysisResponse.location ? analysisResponse.location.name : "--",
         years: analysisResponse.years,
         bbox: analysisResponse.bbox,
+        source: analysisResponse.source || "--",
       });
-      if (analysisResponse.notices && analysisResponse.notices.length) {
-        setNoticeMessage(analysisResponse.notices[0].message);
+      const messages = analysisResponse.messages || analysisResponse.notices || [];
+      if (messages.length) {
+        setNoticeMessage(messages[0].message);
       }
     } catch (err) {
       setAnalysis(null);
@@ -341,15 +365,19 @@ function App() {
       return;
     }
     setAssistantLoading(true);
+    const normalizedQuery = query.trim();
+    const timelineYear =
+      analysis && analysis.timeline && Array.isArray(analysis.timeline.years)
+        ? analysis.timeline.years[timelineIndex]
+        : null;
     logDebug("Assistant request", {
       question: questionText,
       mode,
-      year: analysis ? analysis.timeline.years[timelineIndex] : null,
+      year: timelineYear,
     });
     try {
-      const timelineYear = analysis ? analysis.timeline.years[timelineIndex] : null;
       const response = await postJSON("/ai_explanation", {
-        query: query || null,
+        query: normalizedQuery || null,
         mode,
         question: questionText,
         timeline_year: timelineYear,
@@ -366,7 +394,11 @@ function App() {
             }
           : null,
       });
-      setAnswer(response.summary);
+      if (response && response.success === false) {
+        setAnswer(response.summary || "Please analyze a location first.");
+      } else {
+        setAnswer(response && response.summary ? response.summary : "AI assistant is unavailable.");
+      }
     } catch (err) {
       setAnswer(err.message || "AI assistant is unavailable.");
     } finally {
@@ -384,10 +416,14 @@ function App() {
     }
   }, [mode]);
 
-  const timelineYears = analysis ? analysis.timeline.years : [];
+  const timelineYears =
+    analysis && analysis.timeline && Array.isArray(analysis.timeline.years) ? analysis.timeline.years : [];
   const selectedYear = analysis ? timelineYears[timelineIndex] : null;
-  const startYear = analysis ? analysis.years[0] : DEFAULT_YEAR_START;
-  const endYear = analysis ? analysis.years[analysis.years.length - 1] : DEFAULT_YEAR_END;
+  const startYear = analysis && Array.isArray(analysis.years) && analysis.years.length ? analysis.years[0] : DEFAULT_YEAR_START;
+  const endYear =
+    analysis && Array.isArray(analysis.years) && analysis.years.length
+      ? analysis.years[analysis.years.length - 1]
+      : DEFAULT_YEAR_END;
   const forecasted = analysis && selectedYear > endYear;
 
   const factor = analysis && selectedYear ? computeFactor(selectedYear, startYear, endYear) : 0;
@@ -400,18 +436,38 @@ function App() {
       }
     : null;
 
-  const previewBase = analysis ? analysis.timeline.previews[String(startYear)] : null;
-  const previewSelected = analysis && selectedYear ? analysis.timeline.previews[String(selectedYear)] : null;
+  const previewBase =
+    analysis && analysis.timeline && analysis.timeline.previews ? analysis.timeline.previews[String(startYear)] : null;
+  const previewSelected =
+    analysis && analysis.timeline && analysis.timeline.previews && selectedYear
+      ? analysis.timeline.previews[String(selectedYear)]
+      : null;
 
   const indicesByYear = analysis && analysis.indices && analysis.indices.by_year ? analysis.indices.by_year : {};
   const indicesYear = indicesByYear[String(selectedYear)] ? selectedYear : endYear;
   const activeIndices = indicesByYear[String(indicesYear)] || null;
 
+  const statsByYear = analysis && analysis.stats && analysis.stats.by_year ? analysis.stats.by_year : {};
+  const selectedStats = selectedYear && statsByYear[String(selectedYear)] ? statsByYear[String(selectedYear)] : null;
+  const forecastVegetation = charts ? getForecastValue(charts.forecast_years, charts.forecast && charts.forecast.vegetation, selectedYear) : null;
+  const forecastWater = charts ? getForecastValue(charts.forecast_years, charts.forecast && charts.forecast.water, selectedYear) : null;
+  const forecastUrban = charts ? getForecastValue(charts.forecast_years, charts.forecast && charts.forecast.urban, selectedYear) : null;
+
   const activeSource = analysis && analysis.sources ? analysis.sources[String(endYear)] : null;
   const sourceLabel = activeSource === "sentinel" ? "Sentinel-2" : "Demo dataset";
+  const recommendations = analysis && Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
+  const locationName = analysis && analysis.location ? analysis.location.name : "Awaiting analysis...";
 
   const comparisonLabel = analysis ? `Comparing ${startYear} -> ${endYear}` : "Comparing --";
   const selectedLabel = selectedYear ? `Selected year: ${selectedYear}` : "Selected year: --";
+  let timelineNote = "";
+  if (selectedStats && selectedYear) {
+    timelineNote = `Selected ${selectedYear}: vegetation ${selectedStats.vegetation.toFixed(1)}%, water ${selectedStats.water.toFixed(1)}%, urban ${selectedStats.urban.toFixed(1)}%.`;
+  } else if (selectedYear && forecastVegetation !== null) {
+    const waterText = forecastWater !== null ? `, water ${forecastWater.toFixed(1)}%` : "";
+    const urbanText = forecastUrban !== null ? `, urban ${forecastUrban.toFixed(1)}%` : "";
+    timelineNote = `Selected ${selectedYear} (forecast): vegetation ${forecastVegetation.toFixed(1)}%${waterText}${urbanText}.`;
+  }
 
   return (
     <div className="page">
@@ -458,6 +514,7 @@ function App() {
               <div className="section">
                 <h3>Key Changes</h3>
                 <p className="summary">{analysis ? analysis.summary : "Run an analysis to see key changes."}</p>
+                {timelineNote && <p className="timeline-note">{timelineNote}</p>}
               </div>
               <div className="section">
                 <h3>Impact</h3>
@@ -470,7 +527,7 @@ function App() {
               <div className="section">
                 <h3>Recommendations</h3>
                 <div className="recommendations">
-                  {analysis && analysis.recommendations.map((rec) => (
+                  {recommendations.map((rec) => (
                     <span key={rec}>{rec}</span>
                   ))}
                 </div>
@@ -479,8 +536,9 @@ function App() {
           ) : (
             <div className="simple-sections">
               <p className="summary">{analysis ? analysis.summary : "Analyze a location to see a plain-language summary."}</p>
+              {timelineNote && <p className="timeline-note">{timelineNote}</p>}
               <div className="recommendations">
-                {analysis && analysis.recommendations.slice(0, 1).map((rec) => (
+                {recommendations.slice(0, 1).map((rec) => (
                   <span key={rec}>{rec}</span>
                 ))}
               </div>
@@ -548,7 +606,7 @@ function App() {
               <p className="helper">Toggle NDVI, urban growth, and water change layers.</p>
             </div>
             <div className="panel-meta">
-              <span>{analysis ? analysis.location.name : "Awaiting analysis..."}</span>
+              <span>{locationName}</span>
               <span>{analysis ? `${startYear} -> ${selectedYear}${forecasted ? " forecast" : ""}` : "--"}</span>
             </div>
           </div>
