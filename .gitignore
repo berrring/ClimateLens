@@ -1,0 +1,18 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.pdb
+*.pyc
+.pytest_cache/
+
+# Data/cache artifacts
+/data/
+
+# Editor
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
