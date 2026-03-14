@@ -22,6 +22,8 @@ def test_analyze_location(tmp_path):
     assert 2018 in timeline_years
     assert 2023 in timeline_years
     assert 2028 in timeline_years
+    assert 2024 in timeline_years
+    assert 2027 in timeline_years
 
     overlay_2023 = analysis["timeline"]["overlays"].get("2023")
     assert overlay_2023
@@ -47,6 +49,7 @@ def test_generate_explanation_modes(tmp_path):
     assert "summary" in expert
     assert "NDVI" in expert["summary"]
     assert "NDVI" not in simple["summary"]
+    assert "San Francisco" in simple["summary"]
 
 
 def test_preview_encoding(tmp_path):
@@ -55,3 +58,20 @@ def test_preview_encoding(tmp_path):
     preview = ai_module._load_preview(2018)
     assert preview.startswith("data:image/png;base64,")
     base64.b64decode(preview.split(",", 1)[1])
+
+
+def test_demo_analysis_is_location_aware(tmp_path, monkeypatch):
+    _use_tmp_dirs(tmp_path)
+    monkeypatch.delenv("SENTINELHUB_CLIENT_ID", raising=False)
+    monkeypatch.delenv("SENTINELHUB_CLIENT_SECRET", raising=False)
+
+    san_francisco = ai_module.resolve_location("San Francisco")
+    tokyo = ai_module.resolve_location("Tokyo")
+
+    sf_analysis = ai_module.analyze_location(san_francisco, 2016, 2024)
+    tokyo_analysis = ai_module.analyze_location(tokyo, 2016, 2024)
+
+    assert sf_analysis["source"] == "demo"
+    assert sf_analysis["source_mode"] == "config_missing"
+    assert sf_analysis["changes"] != tokyo_analysis["changes"]
+    assert sf_analysis["series"]["vegetation"] != tokyo_analysis["series"]["vegetation"]

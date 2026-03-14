@@ -3,7 +3,7 @@
 See how Earth is changing through AI-powered satellite analysis.
 
 ## Overview
-ClimateLens is an AI-powered satellite monitoring dashboard that detects environmental change (vegetation, urban growth, water, ice) using Sentinel-2 imagery or synthetic fallback scenes. The UI pairs Leaflet heatmaps with Plotly trend charts and natural language insights.
+ClimateLens is an AI-powered satellite monitoring dashboard that detects environmental change (vegetation, urban growth, water, ice) using Sentinel-2 imagery or a location-aware demo fallback. The UI pairs Leaflet heatmaps with Plotly trend charts, a timeline explorer, Simple / Expert modes, and natural language insights.
 
 ## Architecture
 - **FastAPI** backend serving analysis endpoints and static UI assets.
@@ -35,6 +35,12 @@ Optional:
 - `SENTINELHUB_ENABLED` (`true` / `false`)
 
 If credentials are missing or the API is unavailable, the system automatically falls back to a demo dataset.
+Responses and logs now expose the exact source mode:
+
+- `sentinel`: live Sentinel-2 imagery was used
+- `demo`: demo fallback imagery was used
+- `config_missing`, `auth_failed`, `no_scenes`, `download_failed`, `processing_failed`: explicit fallback reasons
+- `mixed`: some years used Sentinel-2 and some used fallback data
 
 ## Run Locally
 1. Create environment and install dependencies:
@@ -45,10 +51,10 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-2. Start the API:
+2. Start the API from the project virtual environment:
 
 ```powershell
-uvicorn main:app --reload
+.\.venv\Scripts\uvicorn.exe main:app --reload
 ```
 
 3. Open the UI:
@@ -59,6 +65,7 @@ uvicorn main:app --reload
 - Sample scenes are generated on first run under `data/`.
 - Analysis caching is stored in `data/cache.db` (SQLite).
 - Sentinel imagery cache is stored in `data/sentinel_cache/`.
+- The API logs whether Sentinel credentials are present, whether authentication succeeds, whether scenes are found, and the exact fallback reason when live data is not used.
 - The map uses OpenStreetMap and optional Esri satellite tiles when online.
 
 ## Tests

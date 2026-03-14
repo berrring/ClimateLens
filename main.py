@@ -85,9 +85,16 @@ def analyze_location(req: AnalyzeRequest):
         req.year_start,
         req.year_end,
     )
+    logger.info("sentinel_runtime=%s", sentinel_config.settings_summary())
     cache_key = _cache_key(location, req.year_start, req.year_end)
     analysis = cache.get_cached_analysis(cache_key)
     cached = True
+    if analysis is not None and not _has_source_diagnostics(analysis):
+        logger.info("cached analysis is missing source diagnostics; recomputing key=%s", cache_key)
+        analysis = None
+    if analysis is not None and not analysis.get("cacheable", True):
+        logger.info("cached analysis is not reusable; recomputing key=%s source_mode=%s", cache_key, analysis.get("source_mode"))
+        analysis = None
     if analysis is None:
         analysis = ai_module.analyze_location(location, req.year_start, req.year_end)
         cache.set_cached_analysis(cache_key, analysis)
@@ -98,8 +105,8 @@ def analyze_location(req: AnalyzeRequest):
     payload["success"] = True
     if payload.get("messages"):
         logger.info("fallback notice=%s", payload["messages"])
-    if payload.get("source") and payload["source"] != "sentinel":
-        logger.info("analysis source_mode=%s", payload["source"])
+    if payload.get("source_mode") and payload["source_mode"] != "sentinel":
+        logger.info("analysis source=%s source_mode=%s", payload.get("source"), payload.get("source_mode"))
     return payload
 
 
@@ -111,6 +118,8 @@ def get_charts_data(req: AnalyzeRequest):
         return _error_response("location_not_found", error, status_code=404)
     cache_key = _cache_key(location, req.year_start, req.year_end)
     analysis = cache.get_cached_analysis(cache_key)
+    if analysis is not None and not _has_source_diagnostics(analysis):
+        analysis = None
     if analysis is None:
         analysis = ai_module.analyze_location(location, req.year_start, req.year_end)
         cache.set_cached_analysis(cache_key, analysis)
@@ -142,12 +151,14 @@ def ai_explanation(req: ExplainRequest):
     )
     cache_key = _cache_key(location, req.year_start, req.year_end)
     analysis = cache.get_cached_analysis(cache_key)
+    if analysis is not None and not _has_source_diagnostics(analysis):
+        analysis = None
     if analysis is None:
         if req.require_cached:
             return {"success": False, "summary": "Please analyze a location first.", "messages": []}
         analysis = ai_module.analyze_location(location, req.year_start, req.year_end)
         cache.set_cached_analysis(cache_key, analysis)
-    source_mode = analysis.get("source_mode", "demo")
+    source_mode = analysis.get("source_mode", analysis.get("source", "demo"))
     if source_mode != "sentinel":
         logger.info("assistant using fallback source=%s", source_mode)
     response = ai_module.answer_question(
@@ -175,3 +186,7 @@ def _error_response(code, message, status_code=400):
         status_code=status_code,
         content={"success": False, "error": {"code": code, "message": message}, "messages": []},
     )
+
+
+def _has_source_diagnostics(analysis):
+    return "source_mode" in analysis and "source_details" in analysis

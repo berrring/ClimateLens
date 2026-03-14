@@ -1,5 +1,7 @@
 ﻿import base64
 import io
+import hashlib
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -39,6 +41,8 @@ DEFAULT_YEAR_END = 2024
 
 DEFAULT_LOCATION = {"name": "San Francisco, CA", "lat": 37.7749, "lon": -122.4194}
 
+logger = logging.getLogger("climatelens.analysis")
+
 CITY_DB = {
     "san francisco": ("San Francisco, CA", 37.7749, -122.4194),
     "new york": ("New York, NY", 40.7128, -74.0060),
@@ -74,7 +78,7 @@ class Scene:
     blue: np.ndarray
     nir: np.ndarray
     swir: np.ndarray
-    source: str = "synthetic"
+    source: str = "demo"
 
 
 class LinearTrendModel:
@@ -302,6 +306,155 @@ def _apply_class(red, green, blue, nir, swir, mask, values, rng):
     swir[mask] = s + noise
 
 
+def _stable_seed(*parts):
+    payload = "|".join(str(part) for part in parts)
+    return int(hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16], 16) % (2**32)
+
+
+def _normalized_field(seed, size, freq_x, freq_y):
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    xx = xx / max(size - 1, 1)
+    yy = yy / max(size - 1, 1)
+
+    phase_a = rng.uniform(0.0, 2.0 * np.pi)
+    phase_b = rng.uniform(0.0, 2.0 * np.pi)
+    wave = np.sin((xx * freq_x + yy * (0.35 * freq_y)) * 2.0 * np.pi + phase_a)
+    ridge = np.cos((yy * freq_y - xx * (0.25 * freq_x)) * 2.0 * np.pi + phase_b)
+    noise = rng.normal(0.0, 0.35, size=(size, size)).astype(np.float32)
+    field = wave + 0.7 * ridge + noise
+    field = (field - field.min()) / (field.max() - field.min() + 1e-6)
+    return field.astype(np.float32)
+
+
+def _limit_share(value):
+    return float(np.clip(value, 0.0, 85.0))
+
+
+def _mask_from_score(score, share, occupied):
+    share = _limit_share(share)
+    mask = np.zeros_like(score, dtype=bool)
+    available = ~occupied
+    if share <= 0.05 or not np.any(available):
+        return mask
+    threshold = np.quantile(score[available], 1.0 - share / 100.0)
+    mask = (score >= threshold) & available
+    return mask
+
+
+def _location_profile(location, year):
+    lat = float(location["lat"])
+    lon = float(location["lon"])
+    lat_abs = abs(lat)
+    tropic = max(0.0, 1.0 - lat_abs / 35.0)
+    temperate = max(0.0, 1.0 - abs(lat_abs - 35.0) / 30.0)
+    polar = min(1.0, max(0.0, (lat_abs - 45.0) / 25.0))
+    wetness = (np.sin(np.radians(lon * 1.6)) + np.cos(np.radians(lat * 2.1)) + 2.0) / 4.0
+    aridity = (np.sin(np.radians(lat * 2.8 - lon * 0.9)) + 1.0) / 2.0
+    urban_driver = (np.cos(np.radians(lat * 3.1 + lon * 0.7)) + 1.0) / 2.0
+
+    step = max(0.0, (year - DEFAULT_YEAR_START) / 2.0)
+
+    vegetation = 20.0 + 34.0 * tropic + 10.0 * temperate - 13.0 * aridity - 7.0 * urban_driver - 1.1 * step
+    water = 2.0 + 13.0 * wetness + 4.0 * (1.0 - aridity) - 0.25 * step
+    urban = 4.0 + 10.0 * urban_driver + 4.0 * (1.0 - wetness) + 0.95 * step
+    ice = 40.0 * polar - (0.7 + 1.6 * polar) * step
+
+    vegetation = _limit_share(vegetation)
+    water = _limit_share(water)
+    urban = _limit_share(urban)
+    ice = _limit_share(ice)
+
+    total = vegetation + water + urban + ice
+    if total > 92.0:
+        scale = 92.0 / total
+        vegetation *= scale
+        water *= scale
+        urban *= scale
+        ice *= scale
+
+    return {
+        "vegetation": vegetation,
+        "water": water,
+        "urban": urban,
+        "ice": ice,
+        "tropic": tropic,
+        "wetness": wetness,
+        "aridity": aridity,
+        "polar": polar,
+        "urban_driver": urban_driver,
+    }
+
+
+def _generate_location_scene(location, year, size=256):
+    profile = _location_profile(location, year)
+    seed = _stable_seed(round(float(location["lat"]), 4), round(float(location["lon"]), 4), year, size)
+    rng = np.random.default_rng(seed)
+
+    vegetation_score = _normalized_field(seed + 11, size, 1.4 + profile["tropic"] * 1.6, 1.8 + profile["wetness"] * 1.3)
+    water_score = _normalized_field(seed + 23, size, 2.0 + profile["wetness"] * 1.2, 2.4 + profile["wetness"] * 1.0)
+    urban_score = _normalized_field(seed + 37, size, 2.8 + profile["urban_driver"] * 1.5, 1.6 + profile["urban_driver"] * 1.0)
+    ice_score = _normalized_field(seed + 51, size, 1.1 + profile["polar"] * 0.8, 1.3 + profile["polar"] * 1.1)
+
+    occupied = np.zeros((size, size), dtype=bool)
+    ice = _mask_from_score(ice_score, profile["ice"], occupied)
+    occupied |= ice
+    water = _mask_from_score(water_score, profile["water"], occupied)
+    occupied |= water
+    urban = _mask_from_score(urban_score, profile["urban"], occupied)
+    occupied |= urban
+    vegetation = _mask_from_score(vegetation_score, profile["vegetation"], occupied)
+
+    background = rng.normal(0.18 + profile["aridity"] * 0.05, 0.025, size=(size, size))
+    red = background.copy()
+    green = background.copy()
+    blue = background.copy()
+    nir = background.copy()
+    swir = background.copy()
+
+    vegetation_values = (
+        0.10 + profile["aridity"] * 0.03,
+        0.32 + profile["wetness"] * 0.16,
+        0.09,
+        0.58 + profile["tropic"] * 0.14,
+        0.18 + profile["aridity"] * 0.05,
+    )
+    water_values = (
+        0.03 + profile["wetness"] * 0.02,
+        0.08 + profile["wetness"] * 0.04,
+        0.17 + profile["wetness"] * 0.06,
+        0.02,
+        0.05,
+    )
+    urban_values = (
+        0.55 + profile["urban_driver"] * 0.08,
+        0.24,
+        0.36 + profile["urban_driver"] * 0.05,
+        0.28,
+        0.50 + profile["urban_driver"] * 0.07,
+    )
+    ice_values = (
+        0.83,
+        0.88,
+        0.90,
+        0.82,
+        0.67,
+    )
+
+    _apply_class(red, green, blue, nir, swir, vegetation, vegetation_values, rng)
+    _apply_class(red, green, blue, nir, swir, water, water_values, rng)
+    _apply_class(red, green, blue, nir, swir, urban, urban_values, rng)
+    _apply_class(red, green, blue, nir, swir, ice, ice_values, rng)
+
+    red = np.clip(red, 0, 1).astype(np.float32)
+    green = np.clip(green, 0, 1).astype(np.float32)
+    blue = np.clip(blue, 0, 1).astype(np.float32)
+    nir = np.clip(nir, 0, 1).astype(np.float32)
+    swir = np.clip(swir, 0, 1).astype(np.float32)
+
+    return Scene(year=year, red=red, green=green, blue=blue, nir=nir, swir=swir, source="demo")
+
+
 def _load_scene(year):
     npz_path = DATA_DIR / f"scene_{year}.npz"
     if not npz_path.exists():
@@ -328,22 +481,32 @@ def _load_scene(year):
     blue = data["blue"]
     nir = data["nir"]
     swir = data["swir"] if "swir" in data else np.clip(red * 0.8 + 0.05, 0, 1)
-    return Scene(year=year, red=red, green=green, blue=blue, nir=nir, swir=swir, source="synthetic")
+    return Scene(year=year, red=red, green=green, blue=blue, nir=nir, swir=swir, source="demo")
 
 
 def _load_scene_for_year(location, year, size=256):
     payload = sentinel_client.fetch_sentinel_bands(location, year, size=(size, size))
-    if payload:
-        return Scene(
-            year=year,
-            red=payload["red"],
-            green=payload["green"],
-            blue=payload["blue"],
-            nir=payload["nir"],
-            swir=payload["swir"],
-            source="sentinel",
+    if payload.get("ok"):
+        return (
+            Scene(
+                year=year,
+                red=payload["red"],
+                green=payload["green"],
+                blue=payload["blue"],
+                nir=payload["nir"],
+                swir=payload["swir"],
+                source="sentinel",
+            ),
+            payload,
         )
-    return _load_scene(year)
+
+    logger.info(
+        "Using demo fallback for %s year=%s reason=%s",
+        location.get("name"),
+        year,
+        payload.get("status"),
+    )
+    return (_generate_location_scene(location, year, size=size), payload)
 
 
 def _encode_image(image):
@@ -424,6 +587,14 @@ def _generate_timeseries(stat_start, stat_end, years):
     return (values + noise).tolist()
 
 
+def _temperature_series(location, years):
+    lat = abs(float(location["lat"]))
+    rng = np.random.default_rng(_stable_seed("temperature", round(float(location["lat"]), 4), round(float(location["lon"]), 4)))
+    baseline = 0.2 + (lat / 90.0) * 0.35
+    slope = 0.08 + (lat / 90.0) * 0.04
+    return [float(baseline + slope * idx + rng.normal(0.0, 0.03)) for idx, _ in enumerate(years)]
+
+
 def _render_heatmap(change, color_neg, color_pos, scale=1.0):
     change_scaled = np.clip(change.astype(np.float32) * float(scale), -1.0, 1.0)
     norm = (change_scaled + 1.0) / 2.0
@@ -485,11 +656,23 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
     year_stats = {}
     year_classes = {}
     sources = {}
+    source_details_by_year = {}
 
     for year in years:
-        scene = _load_scene_for_year(location, year)
+        scene, source_details = _load_scene_for_year(location, year)
         year_scenes[year] = scene
         sources[str(year)] = scene.source
+        source_details_by_year[str(year)] = {
+            "source": scene.source,
+            "mode": source_details.get("status", scene.source),
+            "message": source_details.get("message"),
+            "cached": bool(source_details.get("cached")),
+            "time_interval": source_details.get("time_interval"),
+            "scenes_found": source_details.get("scenes_found"),
+            "scene_dates": source_details.get("scene_dates"),
+            "error": source_details.get("error"),
+            "runtime": source_details.get("runtime"),
+        }
         classes = _classify(scene)
         stats = _scene_stats(scene, classes)
         year_classes[year] = classes
@@ -515,8 +698,7 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
         "ice": [year_stats[y]["ice"] for y in years],
     }
 
-    temperature = np.linspace(0.2, 1.4, len(years)) + np.random.default_rng(222).normal(0, 0.1, len(years))
-    series["temperature"] = temperature.tolist()
+    series["temperature"] = _temperature_series(location, years)
 
     forecast_years = list(range(year_end + 1, year_end + 6))
     forecast = {
@@ -528,10 +710,7 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
     start_preview_img = preview_images[year_start]
     end_preview_img = preview_images[year_end]
 
-    timeline_years = list(years)
-    forecast_anchor = year_end + 5
-    if forecast_anchor not in timeline_years:
-        timeline_years.append(forecast_anchor)
+    timeline_years = sorted(set(list(years) + forecast_years))
 
     timeline_overlays = {}
     timeline_previews = {}
@@ -540,9 +719,11 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
     for year in timeline_years:
         if year <= year_end:
             factor = (year - year_start) / span
+            timeline_change_maps = sp.change_maps(classes_start, year_classes[year])
         else:
             factor = 1 + (year - year_end) / span
-        timeline_overlays[str(year)] = _overlay_images_from_change(change_maps, scale=factor)
+            timeline_change_maps = change_maps
+        timeline_overlays[str(year)] = _overlay_images_from_change(timeline_change_maps, scale=1.0 if year <= year_end else factor)
 
         if year in preview_images:
             timeline_previews[str(year)] = _encode_image(preview_images[year])
@@ -570,11 +751,15 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
         for year in years
     }
 
-    notices = []
-    if any(value != "sentinel" for value in sources.values()):
-        notices.append({"code": "fallback_data", "message": "Using demo fallback data for this location."})
+    source_summary = _summarize_source_details(sources, source_details_by_year)
+    notices = _source_notices(source_summary)
 
-    source_mode = _summarize_source_mode(sources)
+    logger.info(
+        "Analysis source summary location=%s source=%s source_mode=%s",
+        location.get("name"),
+        source_summary["source"],
+        source_summary["mode"],
+    )
 
     analysis = {
         "analysis_id": uuid.uuid4().hex,
@@ -582,7 +767,12 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
         "bbox": location_to_bbox(location["lat"], location["lon"]),
         "years": years,
         "sources": sources,
-        "source_mode": source_mode,
+        "source": source_summary["source"],
+        "source_mode": source_summary["mode"],
+        "source_details": {
+            "summary": source_summary,
+            "by_year": source_details_by_year,
+        },
         "notices": notices,
         "stats": {"start": stats_start, "end": stats_end, "by_year": {str(y): year_stats[y] for y in years}},
         "changes": changes,
@@ -609,22 +799,59 @@ def analyze_location(location, year_start=DEFAULT_YEAR_START, year_end=DEFAULT_Y
         "series": series,
         "forecast_years": forecast_years,
         "forecast": forecast,
+        "cacheable": source_summary["cacheable"],
     }
 
     return analysis
 
 
-def _summarize_source_mode(sources):
+def _summarize_source_details(sources, source_details_by_year):
     if not sources:
-        return "demo"
-    values = {value for value in sources.values()}
+        return {"source": "demo", "mode": "demo", "cacheable": True}
+
+    values = set(sources.values())
+    fallback_modes = [
+        details.get("mode", "demo")
+        for details in source_details_by_year.values()
+        if details.get("source") != "sentinel"
+    ]
+    unique_fallback_modes = sorted({mode for mode in fallback_modes if mode})
+    transient_failures = {"auth_failed", "download_failed", "processing_failed"}
+    cacheable = not any(mode in transient_failures for mode in unique_fallback_modes)
+
     if values == {"sentinel"}:
-        return "sentinel"
-    if values == {"synthetic"}:
-        return "demo"
-    if "sentinel" in values and len(values) > 1:
-        return "mixed"
-    return "demo"
+        return {"source": "sentinel", "mode": "sentinel", "cacheable": True}
+
+    if "sentinel" in values:
+        return {"source": "mixed", "mode": "mixed", "cacheable": cacheable}
+
+    if len(unique_fallback_modes) == 1:
+        return {"source": "demo", "mode": unique_fallback_modes[0], "cacheable": cacheable}
+
+    return {"source": "demo", "mode": "demo", "cacheable": cacheable}
+
+
+def _source_mode_message(mode):
+    messages = {
+        "sentinel": "Using live Sentinel-2 imagery.",
+        "mixed": "Using Sentinel-2 imagery for some years and demo fallback for years that failed.",
+        "demo": "Using demo fallback data for this location.",
+        "config_missing": "Using demo fallback data because Sentinel Hub credentials or configuration are missing.",
+        "library_missing": "Using demo fallback data because the sentinelhub package is unavailable in the active Python environment.",
+        "disabled": "Using demo fallback data because Sentinel Hub is disabled.",
+        "auth_failed": "Using demo fallback data because Sentinel Hub authentication failed.",
+        "no_scenes": "Using demo fallback data because no Sentinel-2 scenes were found for the selected location and date range.",
+        "download_failed": "Using demo fallback data because Sentinel imagery download failed.",
+        "processing_failed": "Using demo fallback data because downloaded Sentinel imagery could not be processed.",
+    }
+    return messages.get(mode, "Using demo fallback data for this location.")
+
+
+def _source_notices(source_summary):
+    mode = source_summary.get("mode", "demo")
+    if mode == "sentinel":
+        return []
+    return [{"code": mode, "message": _source_mode_message(mode)}]
 
 
 def generate_recommendations(changes):
@@ -649,6 +876,7 @@ def generate_explanation(analysis, mode="simple", question=None, year_focus=None
     idx = analysis["indices"]
     year_start = analysis["years"][0]
     year_end = analysis["years"][-1]
+    location_name = analysis["location"]["name"]
 
     recommendations = generate_recommendations(changes)
 
@@ -732,12 +960,12 @@ def generate_explanation(analysis, mode="simple", question=None, year_focus=None
         question = question.strip()
     if question:
         response = (
-            f"You asked: '{question}'. {detail}{focus_note}"
+            f"You asked about {location_name}: '{question}'. {detail}{focus_note}"
             f"Key recommendation: {recommendations[0]}"
         )
     else:
         response = (
-            f"Changes detected between {year_start} and {year_end}. {detail}{focus_note}"
+            f"Changes detected in {location_name} between {year_start} and {year_end}. {detail}{focus_note}"
             f"Recommended action: {recommendations[0]}"
         )
 
@@ -939,7 +1167,9 @@ def analysis_payload(analysis, mode):
         "bbox": analysis["bbox"],
         "years": analysis["years"],
         "sources": analysis.get("sources", {}),
-        "source": analysis.get("source_mode", "demo"),
+        "source": analysis.get("source", "demo"),
+        "source_mode": analysis.get("source_mode", analysis.get("source", "demo")),
+        "source_details": analysis.get("source_details", {}),
         "notices": analysis.get("notices", []),
         "messages": analysis.get("notices", []),
         "stats": analysis["stats"],
@@ -952,4 +1182,5 @@ def analysis_payload(analysis, mode):
         "summary": explanation["summary"],
         "recommendations": explanation["recommendations"],
         "insights": explanation.get("insights", {}),
+        "cacheable": analysis.get("cacheable", True),
     }

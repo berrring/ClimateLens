@@ -54,6 +54,10 @@ function formatChange(value) {
   return `${sign}${value.toFixed(1)} pp`;
 }
 
+function humanizeMode(mode) {
+  return mode ? mode.replace(/_/g, " ") : "";
+}
+
 function getForecastValue(forecastYears, forecastValues, year) {
   if (!Array.isArray(forecastYears) || !Array.isArray(forecastValues)) {
     return null;
@@ -427,14 +431,6 @@ function App() {
   const forecasted = analysis && selectedYear > endYear;
 
   const factor = analysis && selectedYear ? computeFactor(selectedYear, startYear, endYear) : 0;
-  const displayChanges = analysis
-    ? {
-        vegetation: analysis.changes.vegetation * factor,
-        water: analysis.changes.water * factor,
-        urban: analysis.changes.urban * factor,
-        ice: analysis.changes.ice * factor,
-      }
-    : null;
 
   const previewBase =
     analysis && analysis.timeline && analysis.timeline.previews ? analysis.timeline.previews[String(startYear)] : null;
@@ -448,13 +444,47 @@ function App() {
   const activeIndices = indicesByYear[String(indicesYear)] || null;
 
   const statsByYear = analysis && analysis.stats && analysis.stats.by_year ? analysis.stats.by_year : {};
+  const baseStats = statsByYear[String(startYear)] || (analysis && analysis.stats ? analysis.stats.start : null);
   const selectedStats = selectedYear && statsByYear[String(selectedYear)] ? statsByYear[String(selectedYear)] : null;
   const forecastVegetation = charts ? getForecastValue(charts.forecast_years, charts.forecast && charts.forecast.vegetation, selectedYear) : null;
   const forecastWater = charts ? getForecastValue(charts.forecast_years, charts.forecast && charts.forecast.water, selectedYear) : null;
   const forecastUrban = charts ? getForecastValue(charts.forecast_years, charts.forecast && charts.forecast.urban, selectedYear) : null;
+  const forecastIce = charts ? getForecastValue(charts.forecast_years, charts.forecast && charts.forecast.ice, selectedYear) : null;
 
-  const activeSource = analysis && analysis.sources ? analysis.sources[String(endYear)] : null;
-  const sourceLabel = activeSource === "sentinel" ? "Sentinel-2" : "Demo dataset";
+  const displayChanges = analysis && baseStats
+    ? selectedStats
+      ? {
+          vegetation: selectedStats.vegetation - baseStats.vegetation,
+          water: selectedStats.water - baseStats.water,
+          urban: selectedStats.urban - baseStats.urban,
+          ice: selectedStats.ice - baseStats.ice,
+        }
+      : forecastVegetation !== null
+        ? {
+            vegetation: forecastVegetation - baseStats.vegetation,
+            water: (forecastWater !== null ? forecastWater : analysis.stats.end.water) - baseStats.water,
+            urban: (forecastUrban !== null ? forecastUrban : analysis.stats.end.urban) - baseStats.urban,
+            ice: (forecastIce !== null ? forecastIce : analysis.stats.end.ice) - baseStats.ice,
+          }
+        : {
+            vegetation: analysis.changes.vegetation * factor,
+            water: analysis.changes.water * factor,
+            urban: analysis.changes.urban * factor,
+            ice: analysis.changes.ice * factor,
+          }
+    : null;
+
+  const activeYearKey = selectedYear && selectedYear <= endYear ? String(selectedYear) : String(endYear);
+  const activeSource = analysis && analysis.sources ? analysis.sources[activeYearKey] : null;
+  const sourceMode = analysis ? (analysis.source_mode || analysis.source || "demo") : null;
+  const sourceLabel =
+    analysis && analysis.source === "sentinel"
+      ? "Sentinel-2 live"
+      : analysis && analysis.source === "mixed"
+        ? `Mixed source (${activeSource === "sentinel" ? "selected year: Sentinel-2" : humanizeMode(sourceMode)})`
+        : analysis
+          ? `Demo fallback (${humanizeMode(sourceMode)})`
+          : "Awaiting analysis";
   const recommendations = analysis && Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
   const locationName = analysis && analysis.location ? analysis.location.name : "Awaiting analysis...";
 

@@ -1,4 +1,5 @@
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,7 +29,10 @@ def _env_bool(value, default=True):
 def load_settings():
     client_id = os.getenv("SENTINELHUB_CLIENT_ID") or os.getenv("SH_CLIENT_ID")
     client_secret = os.getenv("SENTINELHUB_CLIENT_SECRET") or os.getenv("SH_CLIENT_SECRET")
-    max_cloud = float(os.getenv("SENTINELHUB_MAX_CLOUD", "0.2"))
+    try:
+        max_cloud = float(os.getenv("SENTINELHUB_MAX_CLOUD", "0.2"))
+    except ValueError:
+        max_cloud = 0.2
     cache_dir = Path(os.getenv("SENTINELHUB_CACHE_DIR", Path(__file__).parent / "data" / "sentinel_cache"))
     base_url = os.getenv("SENTINELHUB_BASE_URL") or os.getenv("SH_BASE_URL")
     token_url = os.getenv("SENTINELHUB_TOKEN_URL") or os.getenv("SH_TOKEN_URL")
@@ -68,12 +72,15 @@ def is_configured():
 
 def settings_summary():
     settings = load_settings()
+    configured = bool(SHConfig is not None and settings.enabled and settings.client_id and settings.client_secret)
     return {
         "enabled": settings.enabled,
         "has_client_id": bool(settings.client_id),
         "has_client_secret": bool(settings.client_secret),
         "base_url": settings.base_url,
         "token_url": settings.token_url,
-        "configured": is_configured(),
+        "cache_dir": str(settings.cache_dir),
+        "configured": configured,
         "sentinelhub_available": SHConfig is not None,
+        "python_executable": sys.executable,
     }
