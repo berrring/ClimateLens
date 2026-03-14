@@ -5,6 +5,28 @@ See how Earth is changing through AI-powered satellite analysis.
 ## Overview
 ClimateLens is an AI-powered satellite monitoring dashboard that detects environmental change (vegetation, urban growth, water, ice) using Sentinel-2 imagery or a location-aware demo fallback. The UI pairs Leaflet heatmaps with Plotly trend charts, a timeline explorer, Simple / Expert modes, and natural language insights.
 
+## Quick Start
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+$env:SENTINELHUB_CLIENT_ID="your-client-id"
+$env:SENTINELHUB_CLIENT_SECRET="your-client-secret"
+$env:SENTINELHUB_ENABLED="true"
+$env:SENTINELHUB_MAX_CLOUD="0.2"
+
+.\.venv\Scripts\uvicorn.exe main:app --reload
+```
+
+Open `http://127.0.0.1:8000`.
+
+If you want to run without live Sentinel-2 data, omit the credentials or set:
+
+```powershell
+$env:SENTINELHUB_ENABLED="false"
+```
+
 ## Architecture
 - **FastAPI** backend serving analysis endpoints and static UI assets.
 - **Sentinel Hub integration** in `sentinel_client.py` for live Sentinel-2 imagery (L2A).
